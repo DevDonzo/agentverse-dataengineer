@@ -23,7 +23,15 @@ class EmbedTextBatch(beam.DoFn):
         filenames = [item[0] for item in batch]
         contents = [item[1] for item in batch]
         try:
-            #REPLACE-EMBEDDING-LOGIC
+            # 1. Generate the embedding for the monster's name
+            result = self.client.models.embed_content(
+                model="text-embedding-005",
+                contents=contents,
+                config=EmbedContentConfig(
+                    task_type="RETRIEVAL_DOCUMENT",  
+                    output_dimensionality=768, 
+                )
+            )
             
            
             for filename, content, embedding_object in zip(filenames, contents, result.embeddings):
@@ -87,13 +95,38 @@ def run(argv=None):
     region = pipeline_options.view_as(GoogleCloudOptions).region
 
     with beam.Pipeline(options=pipeline_options) as pipeline:
-        #REPLACE ME-READFILE
+        files = (
+            pipeline
+            | "MatchFiles" >> fileio.MatchFiles(known_args.input_pattern)
+            | "ReadMatches" >> fileio.ReadMatches()
+            | "ExtractContent" >> beam.Map(lambda f: (f.metadata.path, f.read_utf8()))
+        )
 
-        #REPLACE ME-EMBEDDING
+        embeddings = (
+            files
+            | "BatchScrolls" >> beam.BatchElements(min_batch_size=1, max_batch_size=2)
+            | "DistillBatch" >> beam.ParDo(
+                  EmbedTextBatch(project_id=project, region=region)
+              ).with_outputs('failed', main='processed')
+        )
 
-        #REPLACE ME-WRITE TO DB
+        _ = (
+            embeddings.processed
+            | "WriteToSpellbook" >> beam.ParDo(
+                  WriteEssenceToSpellbook(
+                      project_id=project,
+                      region = "us-central1",
+                      instance_name=known_args.instance_name,
+                      db_name=known_args.db_name,
+                      db_password=known_args.db_password
+                  )
+              )
+        )
         
-        #REPLACE ME-LOG FAILURES
+        _ = (
+            embeddings.failed
+            | "LogFailures" >> beam.Map(lambda e: logging.error(f"Embedding failed for file {e[0]}: {e[1]}"))
+        )
 
 if __name__ == '__main__':
     logging.getLogger().setLevel(logging.INFO)
